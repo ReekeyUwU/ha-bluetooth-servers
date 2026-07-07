@@ -1,0 +1,14 @@
+[Unit]
+Description=Hue BLE local control server
+After=bluetooth.target network.target
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=/etc/hue-ble.env
+ExecStart=/path/to/venv/bin/python /path/to/hue_ble_server.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
