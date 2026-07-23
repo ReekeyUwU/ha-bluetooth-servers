@@ -2,6 +2,7 @@ import asyncio
 import colorsys
 import os
 import sys
+import time
 
 sys.path.insert(0, os.environ.get("MAGICLANTERN_LIB_PATH", os.path.dirname(__file__)))
 
@@ -28,11 +29,53 @@ locks = {}
 rainbow_tasks = {}
 
 
+# Onboard Bluetooth adapters (e.g. the Pi's UART-attached BCM chip) can wedge
+# themselves into a state where bluetoothd answers every request, even scans,
+# with org.bluez.Error.InProgress until the hci device is power-cycled.
+# Detect that class of error and self-heal by resetting the adapter, then
+# retry the connection once. A cooldown avoids hammering the adapter with
+# resets if the strip is genuinely just unreachable (powered off / out of
+# range) rather than the adapter being stuck.
+_last_adapter_reset = 0.0
+_ADAPTER_RESET_COOLDOWN = 30.0
+_adapter_reset_lock = asyncio.Lock()
+
+
+def _is_bluez_stuck_error(exc):
+    msg = str(exc)
+    return "InProgress" in msg or "org.bluez.Error" in msg
+
+
+async def reset_adapter():
+    global _last_adapter_reset
+    async with _adapter_reset_lock:
+        now = time.monotonic()
+        if now - _last_adapter_reset < _ADAPTER_RESET_COOLDOWN:
+            return
+        _last_adapter_reset = now
+        lights.clear()
+        hci = os.environ.get("LED_STRIP_HCI_DEVICE", "hci0")
+        proc = await asyncio.create_subprocess_exec(
+            "bash", "-c",
+            f"hciconfig {hci} down && sleep 1 && hciconfig {hci} up && "
+            "systemctl restart bluetooth.service",
+        )
+        await proc.wait()
+        await asyncio.sleep(3)
+
+
 async def get_light(name):
     if name not in lights or not lights[name].is_connected:
         address = STRIPS[name]
         light = MagicLantern(address)
-        await light.connect()
+        try:
+            await light.connect()
+        except Exception as e:
+            if not _is_bluez_stuck_error(e):
+                raise
+            await reset_adapter()
+            light = MagicLantern(address)
+            await light.connect()
         lights[name] = light
     return lights[name]
 
