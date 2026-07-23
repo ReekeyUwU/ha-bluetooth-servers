@@ -64,19 +64,36 @@ async def reset_adapter():
         await asyncio.sleep(3)
 
 
+# A single BLE connect attempt can time out simply because of a weak signal
+# (out-of-range strip, interference) even when the adapter itself is fine.
+# Retry a few times with a bounded per-attempt timeout before giving up; if
+# any attempt fails with the BlueZ "stuck adapter" error class, reset the
+# adapter before the next retry.
+_CONNECT_TIMEOUT = 8.0
+_CONNECT_RETRIES = 4
+_CONNECT_RETRY_DELAY = 2.0
+
+
+async def _connect_with_retries(address):
+    last_exc = None
+    for attempt in range(_CONNECT_RETRIES):
+        light = MagicLantern(address)
+        try:
+            await asyncio.wait_for(light.connect(), timeout=_CONNECT_TIMEOUT)
+            return light
+        except Exception as e:
+            last_exc = e
+            if _is_bluez_stuck_error(e):
+                await reset_adapter()
+            if attempt < _CONNECT_RETRIES - 1:
+                await asyncio.sleep(_CONNECT_RETRY_DELAY)
+    raise last_exc
+
+
 async def get_light(name):
     if name not in lights or not lights[name].is_connected:
         address = STRIPS[name]
-        light = MagicLantern(address)
-        try:
-            await light.connect()
-        except Exception as e:
-            if not _is_bluez_stuck_error(e):
-                raise
-            await reset_adapter()
-            light = MagicLantern(address)
-            await light.connect()
-        lights[name] = light
+        lights[name] = await _connect_with_retries(address)
     return lights[name]
 
 
