@@ -3,9 +3,17 @@
 # command_line/shell_command integrations. Reads the auth token from an env
 # file so it never needs to appear in configuration.yaml.
 #
-# Expects a file at /etc/hue-ble.env (or $HUE_BLE_ENV_FILE) containing:
+# Expects a file at /etc/hue-ble.env, or /config/hue-ble.env if this script
+# runs inside the Home Assistant container (where /etc isn't shared with the
+# host), or $HUE_BLE_ENV_FILE, containing:
 #   HUE_BLE_AUTH_TOKEN=your-token-here
-ENV_FILE="${HUE_BLE_ENV_FILE:-/etc/hue-ble.env}"
+if [ -n "$HUE_BLE_ENV_FILE" ]; then
+  ENV_FILE="$HUE_BLE_ENV_FILE"
+elif [ -f /etc/hue-ble.env ]; then
+  ENV_FILE=/etc/hue-ble.env
+else
+  ENV_FILE=/config/hue-ble.env
+fi
 if [ -f "$ENV_FILE" ]; then
   # shellcheck disable=SC1090
   source "$ENV_FILE"

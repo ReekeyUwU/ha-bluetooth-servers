@@ -1,8 +1,39 @@
 import asyncio
+import fcntl
 import os
 from aiohttp import web
 from bleak import BleakScanner
 import HueBLE
+
+# Shared across ALL BLE-controlling services on this Pi (hue_ble_server.py,
+# magiclantern_server.py) - the onboard Bluetooth adapter crashes (hci0 goes
+# DOWN) when two separate processes hit it with truly concurrent operations,
+# even though each service already serializes its own device access. This
+# lock forces every BLE connect/read/write on the whole Pi to be strictly
+# one-at-a-time across process boundaries.
+BLE_ADAPTER_LOCK_PATH = os.environ.get("BLE_ADAPTER_LOCK_PATH", "/tmp/ble_adapter.lock")
+
+
+class _AsyncFileLock:
+    def __init__(self, path):
+        self._path = path
+        self._fh = None
+
+    async def __aenter__(self):
+        loop = asyncio.get_event_loop()
+        self._fh = open(self._path, "w")
+        await loop.run_in_executor(None, fcntl.flock, self._fh, fcntl.LOCK_EX)
+        return self
+
+    async def __aexit__(self, *exc):
+        fcntl.flock(self._fh, fcntl.LOCK_UN)
+        self._fh.close()
+        self._fh = None
+
+
+def ble_adapter_lock():
+    return _AsyncFileLock(BLE_ADAPTER_LOCK_PATH)
+
 
 AUTH_TOKEN = os.environ["HUE_BLE_AUTH_TOKEN"]
 
@@ -21,10 +52,42 @@ async def auth_middleware(request, handler):
 
 lights = {}
 locks = {}
+idle_disconnect_tasks = {}
+
+# Keep BLE connections short-lived: the Pi's onboard UART Bluetooth chip
+# gets overloaded when several connections are held open indefinitely
+# alongside the LED strip. Disconnect a lamp after a short idle period
+# instead of keeping it connected forever; get_light() will reconnect
+# on-demand next time it is actually needed.
+_IDLE_DISCONNECT_DELAY = 10.0
+
+
+async def disconnect_light(name):
+    light = lights.pop(name, None)
+    if light is not None:
+        try:
+            await light.disconnect()
+        except Exception:
+            pass
+
+
+async def _idle_disconnect(name):
+    try:
+        await asyncio.sleep(_IDLE_DISCONNECT_DELAY)
+        await disconnect_light(name)
+    except asyncio.CancelledError:
+        pass
+
+
+def _schedule_idle_disconnect(name):
+    pending = idle_disconnect_tasks.pop(name, None)
+    if pending is not None:
+        pending.cancel()
+    idle_disconnect_tasks[name] = asyncio.ensure_future(_idle_disconnect(name))
 
 
 async def get_light(name):
-    if name not in lights:
+    if name not in lights or not lights[name].connected:
         address = LAMPS[name]
         device = await BleakScanner.find_device_by_address(address, timeout=15)
         if device is None:
@@ -38,8 +101,14 @@ async def with_lock(name, coro_fn):
     if name not in locks:
         locks[name] = asyncio.Lock()
     async with locks[name]:
-        light = await get_light(name)
-        return await coro_fn(light)
+        async with ble_adapter_lock():
+            pending = idle_disconnect_tasks.pop(name, None)
+            if pending is not None:
+                pending.cancel()
+            light = await get_light(name)
+            result = await coro_fn(light)
+    _schedule_idle_disconnect(name)
+    return result
 
 
 async def handle_on(request):

@@ -3,9 +3,17 @@
 # Home Assistant's command_line/shell_command integrations. Reads the auth
 # token from an env file so it never needs to appear in configuration.yaml.
 #
-# Expects a file at /etc/led-strip.env (or $LED_STRIP_ENV_FILE) containing:
+# Expects a file at /etc/led-strip.env, or /config/led-strip.env if this
+# script runs inside the Home Assistant container (where /etc isn't shared
+# with the host), or $LED_STRIP_ENV_FILE, containing:
 #   LED_STRIP_AUTH_TOKEN=your-token-here
-ENV_FILE="${LED_STRIP_ENV_FILE:-/etc/led-strip.env}"
+if [ -n "$LED_STRIP_ENV_FILE" ]; then
+  ENV_FILE="$LED_STRIP_ENV_FILE"
+elif [ -f /etc/led-strip.env ]; then
+  ENV_FILE=/etc/led-strip.env
+else
+  ENV_FILE=/config/led-strip.env
+fi
 if [ -f "$ENV_FILE" ]; then
   # shellcheck disable=SC1090
   source "$ENV_FILE"
@@ -35,6 +43,10 @@ case "$1" in
   speed)
     curl -s -X POST -H "X-Auth-Token: $TOKEN" -H "Content-Type: application/json" \
       -d "{\"value\":$2}" "$BASE/speed"
+    ;;
+  gradient)
+    curl -s -X POST -H "X-Auth-Token: $TOKEN" -H "Content-Type: application/json" \
+      -d "{\"color_a\":[$2,$3,$4],\"color_b\":[$5,$6,$7],\"speed\":$8}" "$BASE/gradient_start"
     ;;
   *)
     echo "unknown command"
