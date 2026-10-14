@@ -93,7 +93,6 @@ async def get_light(name):
         if device is None:
             raise RuntimeError(f"device {name} ({address}) not found")
         lights[name] = HueBLE.HueBleLight(device)
-        locks[name] = asyncio.Lock()
     return lights[name]
 
 
